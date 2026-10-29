@@ -1,0 +1,37 @@
+# Local credentials and service configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Generated experiment output and Python environments
+outputs/
+*.egg-info/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+llm_cache/
+.cache/
+.venv/
+venv/
+build/
+dist/
+*.log
+.coverage
+htmlcov/
+
+# Local editor settings and OS metadata
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local LaTeX artifacts, if the paper is compiled beside the code
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.synctex.gz

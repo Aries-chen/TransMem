@@ -1,0 +1,877 @@
+--- a/graphiti_core/driver/driver.py
++++ b/graphiti_core/driver/driver.py
+@@ -1,5 +1,7 @@
+ """
+ Copyright 2024, Zep Software, Inc.
++
++Modified for TransMem. See docs/graphiti_changes.patch for source changes.
+ 
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+@@ -31,7 +33,7 @@
+ 
+ DEFAULT_SIZE = 10
+ 
+-load_dotenv()
++# Environment loaded by the TransMem entry point.
+ 
+ ENTITY_INDEX_NAME = os.environ.get('ENTITY_INDEX_NAME', 'entities')
+ EPISODE_INDEX_NAME = os.environ.get('EPISODE_INDEX_NAME', 'episodes')
+--- a/graphiti_core/driver/neo4j_driver.py
++++ b/graphiti_core/driver/neo4j_driver.py
+@@ -1,5 +1,7 @@
+ """
+ Copyright 2024, Zep Software, Inc.
++
++Modified for TransMem. See docs/graphiti_changes.patch for source changes.
+ 
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+@@ -19,6 +21,7 @@
+ from typing import Any
+ 
+ from neo4j import AsyncGraphDatabase, EagerResult
++from neo4j.exceptions import ClientError
+ from typing_extensions import LiteralString
+ 
+ from graphiti_core.driver.driver import GraphDriver, GraphDriverSession, GraphProvider
+@@ -46,17 +49,8 @@
+         )
+         self._database = database
+ 
+-        # Schedule the indices and constraints to be built
+-        import asyncio
+-
+-        try:
+-            # Try to get the current event loop
+-            loop = asyncio.get_running_loop()
+-            # Schedule the build_indices_and_constraints to run
+-            loop.create_task(self.build_indices_and_constraints())
+-        except RuntimeError:
+-            # No event loop running, this will be handled later
+-            pass
++        # TransMem initializes indexes explicitly and awaits completion. Scheduling
++        # a second background initialization races with the explicit call.
+ 
+         self.aoss_client = None
+ 
+@@ -88,6 +82,21 @@
+             'CALL db.indexes() YIELD name DROP INDEX name',
+         )
+ 
++    async def _execute_index_query(self, query: LiteralString) -> EagerResult | None:
++        """Execute an index creation query, ignoring 'index already exists' errors.
++
++        Neo4j can raise EquivalentSchemaRuleAlreadyExists when concurrent CREATE INDEX
++        IF NOT EXISTS queries race, even though the index exists. This is safe to ignore.
++        """
++        try:
++            return await self.execute_query(query)
++        except ClientError as e:
++            # Ignore "equivalent index already exists" error (race condition with IF NOT EXISTS)
++            if 'EquivalentSchemaRuleAlreadyExists' in str(e):
++                logger.debug(f'Index already exists (concurrent creation): {query[:50]}...')
++                return None
++            raise
++
+     async def build_indices_and_constraints(self, delete_existing: bool = False):
+         if delete_existing:
+             await self.delete_all_indexes()
+@@ -98,14 +107,7 @@
+ 
+         index_queries: list[LiteralString] = range_indices + fulltext_indices
+ 
+-        await semaphore_gather(
+-            *[
+-                self.execute_query(
+-                    query,
+-                )
+-                for query in index_queries
+-            ]
+-        )
++        await semaphore_gather(*[self._execute_index_query(query) for query in index_queries])
+ 
+     async def health_check(self) -> None:
+         """Check Neo4j connectivity by running the driver's verify_connectivity method."""
+--- a/graphiti_core/embedder/openai.py
++++ b/graphiti_core/embedder/openai.py
+@@ -1,5 +1,7 @@
+ """
+ Copyright 2024, Zep Software, Inc.
++
++Modified for TransMem. See docs/graphiti_changes.patch for source changes.
+ 
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+@@ -28,6 +30,7 @@
+     embedding_model: EmbeddingModel | str = DEFAULT_EMBEDDING_MODEL
+     api_key: str | None = None
+     base_url: str | None = None
++    request_timeout_s: float = 120.0
+ 
+ 
+ class OpenAIEmbedder(EmbedderClient):
+@@ -49,7 +52,11 @@
+         if client is not None:
+             self.client = client
+         else:
+-            self.client = AsyncOpenAI(api_key=config.api_key, base_url=config.base_url)
++            self.client = AsyncOpenAI(
++                api_key=config.api_key,
++                base_url=config.base_url,
++                timeout=config.request_timeout_s,
++            )
+ 
+     async def create(
+         self, input_data: str | list[str] | Iterable[int] | Iterable[Iterable[int]]
+--- a/graphiti_core/graphiti.py
++++ b/graphiti_core/graphiti.py
+@@ -1,5 +1,7 @@
+ """
+ Copyright 2024, Zep Software, Inc.
++
++Modified for TransMem. See docs/graphiti_changes.patch for source changes.
+ 
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+@@ -15,6 +17,7 @@
+ """
+ 
+ import logging
++import os
+ from datetime import datetime
+ from time import time
+ 
+@@ -99,7 +102,9 @@
+ 
+ logger = logging.getLogger(__name__)
+ 
+-load_dotenv()
++# Environment loaded by the TransMem entry point.
++
++FAIL_OPEN_EXTRACT_EDGES = bool(int(os.getenv('GRAPHITI_EXTRACT_EDGES_FAIL_OPEN', '1')))
+ 
+ 
+ class AddEpisodeResults(BaseModel):
+@@ -386,15 +391,27 @@
+         uuid_map: dict[str, str],
+     ) -> tuple[list[EntityEdge], list[EntityEdge]]:
+         """Extract edges from episode and resolve against existing graph."""
+-        extracted_edges = await extract_edges(
+-            self.clients,
+-            episode,
+-            extracted_nodes,
+-            previous_episodes,
+-            edge_type_map,
+-            group_id,
+-            edge_types,
+-        )
++        try:
++            extracted_edges = await extract_edges(
++                self.clients,
++                episode,
++                extracted_nodes,
++                previous_episodes,
++                edge_type_map,
++                group_id,
++                edge_types,
++            )
++        except Exception:
++            if not FAIL_OPEN_EXTRACT_EDGES:
++                raise
++            logger.exception(
++                '[Graphiti] extract_edges failed; fail-open enabled, skipping entity edges for '
++                'episode=%s group_id=%s extracted_nodes=%d',
++                episode.uuid,
++                group_id,
++                len(extracted_nodes),
++            )
++            return [], []
+ 
+         edges = resolve_edge_pointers(extracted_edges, uuid_map)
+ 
+@@ -627,6 +644,7 @@
+         previous_episode_uuids: list[str] | None = None,
+         edge_types: dict[str, type[BaseModel]] | None = None,
+         edge_type_map: dict[tuple[str, str], list[str]] | None = None,
++        skip_node_summaries: bool = False,
+     ) -> AddEpisodeResults:
+         """
+         Process an episode and update the graph.
+@@ -685,6 +703,7 @@
+         """
+         start = time()
+         now = utc_now()
++        llm_client = self.clients.llm_client
+ 
+         validate_entity_types(entity_types)
+         validate_excluded_entity_types(excluded_entity_types, entity_types)
+@@ -750,7 +769,7 @@
+                     entity_types,
+                 )
+ 
+-                # Extract and resolve edges in parallel with attribute extraction
++                # Extract and resolve edges
+                 resolved_edges, invalidated_edges = await self._extract_and_resolve_edges(
+                     episode,
+                     extracted_nodes,
+@@ -763,8 +782,15 @@
+                 )
+ 
+                 # Extract node attributes
++                async def _skip_summary(n): return False
++
+                 hydrated_nodes = await extract_attributes_from_nodes(
+-                    self.clients, nodes, episode, previous_episodes, entity_types
++                    self.clients,
++                    nodes,
++                    episode,
++                    previous_episodes,
++                    entity_types,
++                    should_summarize_node=_skip_summary if skip_node_summaries else None
+                 )
+ 
+                 entity_edges = resolved_edges + invalidated_edges
+@@ -870,6 +896,7 @@
+         """
+         with self.tracer.start_span('add_episode_bulk') as bulk_span:
+             bulk_span.add_attributes({'episode.count': len(bulk_episodes)})
++            llm_client = self.clients.llm_client
+ 
+             try:
+                 start = time()
+--- a/graphiti_core/helpers.py
++++ b/graphiti_core/helpers.py
+@@ -1,5 +1,7 @@
+ """
+ Copyright 2024, Zep Software, Inc.
++
++Modified for TransMem. See docs/graphiti_changes.patch for source changes.
+ 
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+@@ -30,10 +32,10 @@
+ from graphiti_core.driver.driver import GraphProvider
+ from graphiti_core.errors import GroupIdValidationError
+ 
+-load_dotenv()
++# Environment loaded by the TransMem entry point.
+ 
+ USE_PARALLEL_RUNTIME = bool(os.getenv('USE_PARALLEL_RUNTIME', False))
+-SEMAPHORE_LIMIT = int(os.getenv('SEMAPHORE_LIMIT', 20))
++SEMAPHORE_LIMIT = int(os.getenv('SEMAPHORE_LIMIT', 32))
+ MAX_REFLEXION_ITERATIONS = int(os.getenv('MAX_REFLEXION_ITERATIONS', 0))
+ DEFAULT_PAGE_LIMIT = 20
+ 
+--- a/graphiti_core/llm_client/azure_openai_client.py
++++ b/graphiti_core/llm_client/azure_openai_client.py
+@@ -1,5 +1,7 @@
+ """
+ Copyright 2024, Zep Software, Inc.
++
++Modified for TransMem. See docs/graphiti_changes.patch for source changes.
+ 
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+@@ -82,7 +84,8 @@
+         if supports_reasoning and verbosity:
+             request_kwargs['text'] = {'verbosity': verbosity}  # type: ignore
+ 
+-        return await self.client.responses.parse(**request_kwargs)
++        response = await self.client.responses.parse(**request_kwargs)
++        return response
+ 
+     async def _create_completion(
+         self,
+@@ -106,7 +109,8 @@
+         if temperature_value is not None:
+             request_kwargs['temperature'] = temperature_value
+ 
+-        return await self.client.chat.completions.create(**request_kwargs)
++        response = await self.client.chat.completions.create(**request_kwargs)
++        return response
+ 
+     @staticmethod
+     def _supports_reasoning_features(model: str) -> bool:
+--- a/graphiti_core/llm_client/client.py
++++ b/graphiti_core/llm_client/client.py
+@@ -1,5 +1,7 @@
+ """
+ Copyright 2024, Zep Software, Inc.
++
++Modified for TransMem. See docs/graphiti_changes.patch for source changes.
+ 
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+@@ -88,6 +90,15 @@
+     def set_tracer(self, tracer: Tracer) -> None:
+         """Set the tracer for this LLM client."""
+         self.tracer = tracer
++
++
++
++
++
++
++
++
++
+ 
+     def _clean_input(self, input: str) -> str:
+         """Clean input string of invalid unicode and control characters.
+--- a/graphiti_core/llm_client/openai_base_client.py
++++ b/graphiti_core/llm_client/openai_base_client.py
+@@ -1,5 +1,7 @@
+ """
+ Copyright 2024, Zep Software, Inc.
++
++Modified for TransMem. See docs/graphiti_changes.patch for source changes.
+ 
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+@@ -31,8 +33,8 @@
+ 
+ logger = logging.getLogger(__name__)
+ 
+-DEFAULT_MODEL = 'gpt-5-mini'
+-DEFAULT_SMALL_MODEL = 'gpt-5-nano'
++DEFAULT_MODEL = 'gpt-4o-mini'
++DEFAULT_SMALL_MODEL = 'gpt-4o-mini'
+ DEFAULT_REASONING = 'minimal'
+ DEFAULT_VERBOSITY = 'low'
+ 
+--- a/graphiti_core/llm_client/openai_client.py
++++ b/graphiti_core/llm_client/openai_client.py
+@@ -1,5 +1,7 @@
+ """
+ Copyright 2024, Zep Software, Inc.
++
++Modified for TransMem. See docs/graphiti_changes.patch for source changes.
+ 
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+@@ -106,10 +108,11 @@
+             model.startswith('gpt-5') or model.startswith('o1') or model.startswith('o3')
+         )
+ 
+-        return await self.client.chat.completions.create(
++        response = await self.client.chat.completions.create(
+             model=model,
+             messages=messages,
+             temperature=temperature if not is_reasoning_model else None,
+             max_tokens=max_tokens,
+             response_format={'type': 'json_object'},
+         )
++        return response
+--- a/graphiti_core/llm_client/openai_generic_client.py
++++ b/graphiti_core/llm_client/openai_generic_client.py
+@@ -1,5 +1,7 @@
+ """
+ Copyright 2024, Zep Software, Inc.
++
++Modified for TransMem. See docs/graphiti_changes.patch for source changes.
+ 
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+@@ -25,6 +27,7 @@
+ from pydantic import BaseModel
+ 
+ from ..prompts.models import Message
++from transmem.runtime_api import apply_completion_limit
+ from .client import LLMClient, get_extraction_language_instruction
+ from .config import DEFAULT_MAX_TOKENS, LLMConfig, ModelSize
+ from .errors import RateLimitError, RefusalError
+@@ -32,6 +35,7 @@
+ logger = logging.getLogger(__name__)
+ 
+ DEFAULT_MODEL = 'gpt-4.1-mini'
++DEFAULT_SMALL_MODEL = 'gpt-4.1-nano'
+ 
+ 
+ class OpenAIGenericClient(LLMClient):
+@@ -56,7 +60,7 @@
+     """
+ 
+     # Class-level constants
+-    MAX_RETRIES: ClassVar[int] = 2
++    MAX_RETRIES: ClassVar[int] = 3
+ 
+     def __init__(
+         self,
+@@ -88,9 +92,28 @@
+         self.max_tokens = max_tokens
+ 
+         if client is None:
+-            self.client = AsyncOpenAI(api_key=config.api_key, base_url=config.base_url)
++            self.client = AsyncOpenAI(api_key=config.api_key, base_url=config.base_url, timeout=2400.0) 
+         else:
+             self.client = client
++        self._warned_small_model_fallback = False
++
++    def _get_model_for_size(self, model_size: ModelSize) -> str:
++        """Return the configured model for the requested size.
++
++        OpenAIGenericClient historically ignored `model_size` and always used the
++        main model. HEART-Evo uses this client path, so we wire the Graphiti
++        small-model contract through here as well.
++        """
++        if model_size == ModelSize.small:
++            if self.small_model:
++                return self.small_model
++            if not self._warned_small_model_fallback:
++                logger.warning(
++                    'small_model is not configured; ModelSize.small requests will fall back to the main model.'
++                )
++                self._warned_small_model_fallback = True
++            return self.model or DEFAULT_MODEL
++        return self.model or DEFAULT_MODEL
+ 
+     async def _generate_response(
+         self,
+@@ -120,17 +143,21 @@
+                     },
+                 }
+ 
+-            response = await self.client.chat.completions.create(
+-                model=self.model or DEFAULT_MODEL,
+-                messages=openai_messages,
+-                temperature=self.temperature,
+-                max_tokens=self.max_tokens,
+-                response_format=response_format,  # type: ignore[arg-type]
+-            )
++            api_kwargs = {
++                "model": self._get_model_for_size(model_size),
++                "messages": openai_messages,
++                "temperature": self.temperature,
++                "response_format": response_format,  # type: ignore[arg-type]
++            }
++            api_kwargs = apply_completion_limit(api_kwargs, self.config.base_url, self.max_tokens)
++            response = await self.client.chat.completions.create(**api_kwargs)
++
+             result = response.choices[0].message.content or ''
+             return json.loads(result)
+         except openai.RateLimitError as e:
+             raise RateLimitError from e
++
++
+         except Exception as e:
+             logger.error(f'Error in generating LLM response: {e}')
+             raise
+@@ -185,6 +212,17 @@
+                 except Exception as e:
+                     last_error = e
+ 
++                    err_text = str(e).lower()
++                    if "maximum context length" in err_text or "parameter=input_tokens" in err_text:
++                        logger.error(
++                            "Context overflow persisted after local recovery; "
++                            "aborting without application-level retry amplification: %s",
++                            e,
++                        )
++                        span.set_status('error', str(e))
++                        span.record_exception(e)
++                        raise
++
+                     # Don't retry if we've hit the max retries
+                     if retry_count >= self.MAX_RETRIES:
+                         logger.error(f'Max retries ({self.MAX_RETRIES}) exceeded. Last error: {e}')
+--- a/graphiti_core/models/edges/edge_db_queries.py
++++ b/graphiti_core/models/edges/edge_db_queries.py
+@@ -1,5 +1,7 @@
+ """
+ Copyright 2024, Zep Software, Inc.
++
++Modified for TransMem. See docs/graphiti_changes.patch for source changes.
+ 
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+@@ -218,7 +220,7 @@
+     """ + (
+         'e.attributes AS attributes'
+         if provider == GraphProvider.KUZU
+-        else 'properties(e) AS attributes'
++        else '{} AS attributes'
+     )
+ 
+ 
+--- a/graphiti_core/models/nodes/node_db_queries.py
++++ b/graphiti_core/models/nodes/node_db_queries.py
+@@ -1,5 +1,7 @@
+ """
+ Copyright 2024, Zep Software, Inc.
++
++Modified for TransMem. See docs/graphiti_changes.patch for source changes.
+ 
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+@@ -273,7 +275,7 @@
+         n.created_at AS created_at,
+         n.summary AS summary,
+         labels(n) AS labels,
+-        properties(n) AS attributes
++        {} AS attributes
+     """
+ 
+ 
+--- a/graphiti_core/prompts/dedupe_edges.py
++++ b/graphiti_core/prompts/dedupe_edges.py
+@@ -1,5 +1,7 @@
+ """
+ Copyright 2024, Zep Software, Inc.
++
++Modified for TransMem. See docs/graphiti_changes.patch for source changes.
+ 
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+@@ -31,7 +33,7 @@
+         ...,
+         description='List of idx values of facts that should be invalidated. If no facts should be invalidated, the list should be empty.',
+     )
+-    fact_type: str = Field(..., description='One of the provided fact types or DEFAULT')
++    fact_type: str = Field(default='DEFAULT', description='One of the provided fact types or DEFAULT')
+ 
+ 
+ class UniqueFact(BaseModel):
+--- a/graphiti_core/prompts/extract_edges.py
++++ b/graphiti_core/prompts/extract_edges.py
+@@ -1,5 +1,7 @@
+ """
+ Copyright 2024, Zep Software, Inc.
++
++Modified for TransMem. See docs/graphiti_changes.patch for source changes.
+ 
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+@@ -31,7 +33,7 @@
+         ..., description='The id of the target entity from the ENTITIES list'
+     )
+     fact: str = Field(
+-        ...,
++        'No description provided',
+         description='A natural language description of the relationship between the entities, paraphrased from the source text',
+     )
+     valid_at: str | None = Field(
+--- a/graphiti_core/search/search_utils.py
++++ b/graphiti_core/search/search_utils.py
+@@ -1,5 +1,7 @@
+ """
+ Copyright 2024, Zep Software, Inc.
++
++Modified for TransMem. See docs/graphiti_changes.patch for source changes.
+ 
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+@@ -60,7 +62,8 @@
+ 
+ logger = logging.getLogger(__name__)
+ 
+-RELEVANT_SCHEMA_LIMIT = 10
++import os
++RELEVANT_SCHEMA_LIMIT = int(os.getenv('GRAPHITI_RELEVANT_SCHEMA_LIMIT', 3))
+ DEFAULT_MIN_SCORE = 0.6
+ DEFAULT_MMR_LAMBDA = 0.5
+ MAX_SEARCH_DEPTH = 3
+--- a/graphiti_core/utils/maintenance/edge_operations.py
++++ b/graphiti_core/utils/maintenance/edge_operations.py
+@@ -1,5 +1,7 @@
+ """
+ Copyright 2024, Zep Software, Inc.
++
++Modified for TransMem. See docs/graphiti_changes.patch for source changes.
+ 
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+@@ -15,6 +17,7 @@
+ """
+ 
+ import logging
++import os
+ from datetime import datetime
+ from time import time
+ 
+@@ -47,6 +50,15 @@
+ 
+ logger = logging.getLogger(__name__)
+ 
++DISABLE_EDGE_INVALIDATION_SEARCH = bool(
++    int(os.getenv('GRAPHITI_DISABLE_EDGE_INVALIDATION_SEARCH', '0'))
++)
++
++# Max invalidation candidates per extracted edge sent to llm_resolve.
++# Smaller limits reduce the candidate evidence passed to the resolver.
++# Set via GRAPHITI_INVALIDATION_LIMIT env var. 0 = use EDGE_HYBRID_SEARCH_RRF default.
++_INVALIDATION_LIMIT = int(os.getenv('GRAPHITI_INVALIDATION_LIMIT', '0'))
++
+ 
+ def build_episodic_edges(
+     entity_nodes: list[EntityNode],
+@@ -289,22 +301,45 @@
+ 
+     related_edges_lists: list[list[EntityEdge]] = [result.edges for result in related_edges_results]
+ 
+-    edge_invalidation_candidate_results: list[SearchResults] = await semaphore_gather(
+-        *[
+-            search(
+-                clients,
+-                extracted_edge.fact,
+-                group_ids=[extracted_edge.group_id],
+-                config=EDGE_HYBRID_SEARCH_RRF,
+-                search_filter=SearchFilters(),
++    if DISABLE_EDGE_INVALIDATION_SEARCH:
++        edge_invalidation_candidates = [[] for _ in extracted_edges]
++    else:
++        # Build a search config with the configured invalidation limit.
++        # When _INVALIDATION_LIMIT == 0, use EDGE_HYBRID_SEARCH_RRF as-is (limit=10).
++        # When _INVALIDATION_LIMIT > 0, cap candidates to save llm_resolve tokens.
++        if _INVALIDATION_LIMIT > 0:
++            from graphiti_core.search.search_config import SearchConfig
++            from graphiti_core.search.search_config_recipes import (
++                EdgeSearchConfig,
++                EdgeSearchMethod,
++                EdgeReranker,
+             )
+-            for extracted_edge in extracted_edges
++            _invalidation_search_config = SearchConfig(
++                edge_config=EdgeSearchConfig(
++                    search_methods=[EdgeSearchMethod.bm25, EdgeSearchMethod.cosine_similarity],
++                    reranker=EdgeReranker.rrf,
++                ),
++                limit=_INVALIDATION_LIMIT,
++            )
++        else:
++            _invalidation_search_config = EDGE_HYBRID_SEARCH_RRF
++
++        edge_invalidation_candidate_results: list[SearchResults] = await semaphore_gather(
++            *[
++                search(
++                    clients,
++                    extracted_edge.fact,
++                    group_ids=[extracted_edge.group_id],
++                    config=_invalidation_search_config,
++                    search_filter=SearchFilters(),
++                )
++                for extracted_edge in extracted_edges
++            ]
++        )
++
++        edge_invalidation_candidates: list[list[EntityEdge]] = [
++            result.edges for result in edge_invalidation_candidate_results
+         ]
+-    )
+-
+-    edge_invalidation_candidates: list[list[EntityEdge]] = [
+-        result.edges for result in edge_invalidation_candidate_results
+-    ]
+ 
+     logger.debug(
+         f'Related edges lists: {[(e.name, e.uuid) for edges_lst in related_edges_lists for e in edges_lst]}'
+--- a/graphiti_core/utils/maintenance/node_operations.py
++++ b/graphiti_core/utils/maintenance/node_operations.py
+@@ -1,5 +1,7 @@
+ """
+ Copyright 2024, Zep Software, Inc.
++
++Modified for TransMem. See docs/graphiti_changes.patch for source changes.
+ 
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+@@ -15,6 +17,7 @@
+ """
+ 
+ import logging
++import os
+ from collections.abc import Awaitable, Callable
+ from time import time
+ from typing import Any
+@@ -48,6 +51,10 @@
+     DedupCandidateIndexes,
+     DedupResolutionState,
+     _build_candidate_indexes,
++    _cached_shingles,
++    _jaccard_similarity,
++    _normalize_name_for_fuzzy,
++    _normalize_string_exact,
+     _resolve_with_similarity,
+ )
+ from graphiti_core.utils.maintenance.edge_operations import (
+@@ -58,6 +65,90 @@
+ logger = logging.getLogger(__name__)
+ 
+ NodeSummaryFilter = Callable[[EntityNode], Awaitable[bool]]
++
++
++def get_node_dedupe_candidate_limit() -> int:
++    try:
++        return max(int(os.getenv('GRAPHITI_NODE_DEDUPE_CANDIDATE_LIMIT', '0')), 0)
++    except ValueError:
++        return 0
++
++
++def get_resolve_nodes_fail_open() -> bool:
++    try:
++        return bool(int(os.getenv('GRAPHITI_RESOLVE_NODES_FAIL_OPEN', '1')))
++    except ValueError:
++        return True
++
++
++def _score_llm_candidate_name(query_name: str, candidate_name: str) -> float:
++    query_exact = _normalize_string_exact(query_name)
++    cand_exact = _normalize_string_exact(candidate_name)
++    if not query_exact or not cand_exact:
++        return 0.0
++
++    score = 0.0
++    if query_exact == cand_exact:
++        score += 100.0
++    if query_exact in cand_exact or cand_exact in query_exact:
++        score += 5.0
++
++    query_fuzzy = _normalize_name_for_fuzzy(query_name)
++    cand_fuzzy = _normalize_name_for_fuzzy(candidate_name)
++    score += 10.0 * _jaccard_similarity(_cached_shingles(query_fuzzy), _cached_shingles(cand_fuzzy))
++
++    q_tokens = set(query_fuzzy.split())
++    c_tokens = set(cand_fuzzy.split())
++    if q_tokens and c_tokens:
++        score += 3.0 * (len(q_tokens & c_tokens) / len(q_tokens | c_tokens))
++
++    return score
++
++
++def select_llm_dedupe_candidates(
++    extracted_nodes: list[EntityNode],
++    indexes: DedupCandidateIndexes,
++    unresolved_indices: list[int],
++    limit: int,
++) -> list[EntityNode]:
++    """
++    Shrink the candidate pool only for the LLM dedupe prompt.
++
++    Deterministic exact/fuzzy resolution still runs on the full merged candidate set.
++    """
++    if limit <= 0 or len(indexes.existing_nodes) <= limit or not unresolved_indices:
++        return indexes.existing_nodes
++
++    scored_rows: list[tuple[float, int, EntityNode]] = []
++    for order, candidate in enumerate(indexes.existing_nodes):
++        best_score = max(
++            _score_llm_candidate_name(extracted_nodes[idx].name, candidate.name)
++            for idx in unresolved_indices
++        )
++        scored_rows.append((best_score, order, candidate))
++
++    positive_rows = [row for row in scored_rows if row[0] > 0]
++    positive_rows.sort(key=lambda row: (-row[0], row[1]))
++
++    selected: list[EntityNode] = []
++    seen: set[str] = set()
++    for _, _, candidate in positive_rows:
++        if candidate.uuid in seen:
++            continue
++        selected.append(candidate)
++        seen.add(candidate.uuid)
++        if len(selected) >= limit:
++            return selected
++
++    for candidate in indexes.existing_nodes:
++        if candidate.uuid in seen:
++            continue
++        selected.append(candidate)
++        seen.add(candidate.uuid)
++        if len(selected) >= limit:
++            break
++
++    return selected
+ 
+ 
+ async def extract_nodes_reflexion(
+@@ -261,6 +352,18 @@
+         return
+ 
+     entity_types_dict: dict[str, type[BaseModel]] = entity_types if entity_types is not None else {}
++    candidate_limit = get_node_dedupe_candidate_limit()
++    llm_existing_nodes = select_llm_dedupe_candidates(
++        extracted_nodes,
++        indexes,
++        state.unresolved_indices,
++        candidate_limit,
++    )
++    llm_indexes = (
++        _build_candidate_indexes(llm_existing_nodes)
++        if len(llm_existing_nodes) != len(indexes.existing_nodes)
++        else indexes
++    )
+ 
+     llm_extracted_nodes = [extracted_nodes[i] for i in state.unresolved_indices]
+ 
+@@ -298,6 +401,15 @@
+                 [(ctx['id'], ctx['name']) for ctx in extracted_nodes_context[-sample_size:]],
+             )
+ 
++    if candidate_limit > 0:
++        logger.debug(
++            'Node dedupe candidate cap: raw=%d llm=%d unresolved=%d limit=%d',
++            len(indexes.existing_nodes),
++            len(llm_indexes.existing_nodes),
++            len(state.unresolved_indices),
++            candidate_limit,
++        )
++
+     existing_nodes_context = [
+         {
+             **{
+@@ -307,7 +419,7 @@
+             },
+             **candidate.attributes,
+         }
+-        for i, candidate in enumerate(indexes.existing_nodes)
++        for i, candidate in enumerate(llm_indexes.existing_nodes)
+     ]
+ 
+     context = {
+@@ -376,8 +488,8 @@
+         resolved_node: EntityNode
+         if duplicate_idx == -1:
+             resolved_node = extracted_node
+-        elif 0 <= duplicate_idx < len(indexes.existing_nodes):
+-            resolved_node = indexes.existing_nodes[duplicate_idx]
++        elif 0 <= duplicate_idx < len(llm_indexes.existing_nodes):
++            resolved_node = llm_indexes.existing_nodes[duplicate_idx]
+         else:
+             logger.warning(
+                 'Invalid duplicate_idx %s for extracted node %s; treating as no duplicate.',
+@@ -419,15 +531,25 @@
+ 
+     _resolve_with_similarity(extracted_nodes, indexes, state)
+ 
+-    await _resolve_with_llm(
+-        llm_client,
+-        extracted_nodes,
+-        indexes,
+-        state,
+-        episode,
+-        previous_episodes,
+-        entity_types,
+-    )
++    try:
++        await _resolve_with_llm(
++            llm_client,
++            extracted_nodes,
++            indexes,
++            state,
++            episode,
++            previous_episodes,
++            entity_types,
++        )
++    except Exception:
++        if not get_resolve_nodes_fail_open():
++            raise
++        logger.exception(
++            '[Graphiti] resolve_nodes.llm_dedupe failed; fail-open enabled, keeping '
++            '%d unresolved extracted nodes as new nodes for episode=%s',
++            len(state.unresolved_indices),
++            getattr(episode, 'uuid', None),
++        )
+ 
+     for idx, node in enumerate(extracted_nodes):
+         if state.resolved_nodes[idx] is None:

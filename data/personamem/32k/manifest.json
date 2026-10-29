@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "subset": "32k",
+  "users": 37,
+  "questions": 475,
+  "history_end": "inclusive zero-based message index",
+  "timestamp_policy": "synthetic UTC reference clock starting 2015-01-01, one day per message",
+  "quality_filter": "preselected fixed question IDs; no new LLM filtering during export",
+  "categories": {
+    "provide_preference_aligned_recommendations": 54,
+    "recalling_the_reasons_behind_previous_updates": 54,
+    "generalizing_to_new_scenarios": 49,
+    "recall_user_shared_facts": 113,
+    "track_full_preference_evolution": 100,
+    "suggest_new_ideas": 88,
+    "recalling_facts_mentioned_by_the_user": 17
+  },
+  "sha256": {
+    "histories.jsonl": "4cf28e10be121382b1d4942bbaf6eddedf0c6d50251c7604985c3cb0866c76b7",
+    "questions.jsonl": "7a15b5a25febdb7b840ca2c96f3519de3387c214ff241bb778507b9622d7c926"
+  }
+}
