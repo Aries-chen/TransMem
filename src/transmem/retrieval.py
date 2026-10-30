@@ -30,7 +30,7 @@ def expand(query_vector, anchors, transitions, config):
     anchor_nodes = {a[k] for a in anchors for k in ('source', 'target')}
     seeds = []
     for edge in transitions:
-        # Source-first matches the legacy choice when both endpoints are anchors.
+        # Prefer the source when both endpoints are anchors.
         anchor = next((node for node in (edge['source'], edge['target'])
                        if node in anchor_nodes), None)
         if anchor is not None:

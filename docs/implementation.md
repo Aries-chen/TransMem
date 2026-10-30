@@ -52,11 +52,15 @@ Graphiti loads. See [source changes](graphiti_changes.patch) and the
 Resolved settings are saved in each run's `config.json`.
 See `python -m transmem.main --help` for command-line overrides.
 
-## Unit Tests
+## Third-Party Notices
 
-```bash
-python -m unittest discover -s tests -v
-```
+`src/graphiti_core` contains modified [Graphiti](https://github.com/getzep/graphiti)
+code, copyright 2024 Zep Software, Inc., under [Apache-2.0](../LICENSE).
+Original copyright headers and per-file modification notices are retained.
+The [source diff](graphiti_changes.patch) and [manifest](graphiti_source_manifest.json)
+compare the bundled source against Graphiti `v0.24.3`
+(`24105b955669f6473ad0324618f452cda07896f9`). Use the bundled code rather than
+installing a separate `graphiti-core` package.
 
-These tests use synthetic inputs and mocks without model or database services.
-They do not replace the service-backed quick start or a full evaluation.
+PersonaMem data is separately [MIT-licensed](../data/personamem/LICENSE).
+Qwen, BGE-M3, and spaCy model weights are not bundled and retain their own licenses.

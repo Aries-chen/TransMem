@@ -398,7 +398,7 @@
  
      def __init__(
          self,
-@@ -88,9 +92,28 @@
+@@ -88,9 +92,23 @@
          self.max_tokens = max_tokens
  
          if client is None:
@@ -409,12 +409,7 @@
 +        self._warned_small_model_fallback = False
 +
 +    def _get_model_for_size(self, model_size: ModelSize) -> str:
-+        """Return the configured model for the requested size.
-+
-+        OpenAIGenericClient historically ignored `model_size` and always used the
-+        main model. HEART-Evo uses this client path, so we wire the Graphiti
-+        small-model contract through here as well.
-+        """
++        """Return the configured model for the requested size."""
 +        if model_size == ModelSize.small:
 +            if self.small_model:
 +                return self.small_model
@@ -428,7 +423,7 @@
  
      async def _generate_response(
          self,
-@@ -120,17 +143,21 @@
+@@ -120,17 +138,21 @@
                      },
                  }
  
@@ -457,7 +452,7 @@
          except Exception as e:
              logger.error(f'Error in generating LLM response: {e}')
              raise
-@@ -185,6 +212,17 @@
+@@ -185,6 +207,17 @@
                  except Exception as e:
                      last_error = e
  
@@ -571,6 +566,35 @@
  DEFAULT_MIN_SCORE = 0.6
  DEFAULT_MMR_LAMBDA = 0.5
  MAX_SEARCH_DEPTH = 3
+@@ -1237,7 +1240,8 @@
+         if embedding_size == 0:
+             return []
+ 
+-        # FIXME: Kuzu currently does not support using variables such as `node.fulltext_query` as an input to FTS, which means `get_relevant_nodes()` won't work with Kuzu as the graph driver.
++        # Kuzu FTS does not accept node.fulltext_query as a variable input;
++        # this branch uses vector similarity instead of full-text search.
+         query = (
+             """
+                                                                                                                                     UNWIND $nodes AS node
+--- a/graphiti_core/utils/bulk_utils.py
++++ b/graphiti_core/utils/bulk_utils.py
+@@ -1,5 +1,7 @@
+ """
+ Copyright 2024, Zep Software, Inc.
++
++Modified for TransMem. See docs/graphiti_changes.patch for source changes.
+ 
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+@@ -222,7 +224,7 @@
+         await driver.graph_operations_interface.edge_save_bulk(None, driver, tx, edges)
+ 
+     elif driver.provider == GraphProvider.KUZU:
+-        # FIXME: Kuzu's UNWIND does not currently support STRUCT[] type properly, so we insert the data one by one instead for now.
++        # Insert records individually because Kuzu UNWIND does not support STRUCT[] properly.
+         episode_query = get_episode_node_save_bulk_query(driver.provider)
+         for episode in episodes:
+             await tx.run(episode_query, **episode)
 --- a/graphiti_core/utils/maintenance/edge_operations.py
 +++ b/graphiti_core/utils/maintenance/edge_operations.py
 @@ -1,5 +1,7 @@

@@ -98,12 +98,7 @@ class OpenAIGenericClient(LLMClient):
         self._warned_small_model_fallback = False
 
     def _get_model_for_size(self, model_size: ModelSize) -> str:
-        """Return the configured model for the requested size.
-
-        OpenAIGenericClient historically ignored `model_size` and always used the
-        main model. HEART-Evo uses this client path, so we wire the Graphiti
-        small-model contract through here as well.
-        """
+        """Return the configured model for the requested size."""
         if model_size == ModelSize.small:
             if self.small_model:
                 return self.small_model

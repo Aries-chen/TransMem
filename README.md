@@ -13,7 +13,7 @@ how a user's preferences have evolved.
 [Implementation details](docs/implementation.md) | [Service setup](docs/services.md)
 
 This repository provides TransMem construction, retrieval, and evaluation on
-the processed [PersonaMem subsets](data/personamem/README.md).
+the processed [PersonaMem](data/personamem/README.md).
 Baseline reproductions and PersonaBench evaluation are not included.
 
 ## Installation
@@ -63,16 +63,13 @@ If you use TransMem, please cite:
   author    = {Chen, Shigeng and Luo, Linhao and Shi, Changlong and Qiu, Zhangchi and Pan, Shirui},
   booktitle = {Advances in Neural Information Processing Systems},
   year      = {2026},
-  note      = {Accepted; to appear},
-  url       = {https://github.com/Aries-chen/TransMem}
+  note      = {Accepted; to appear}
 }
 ```
-
-Please also cite [PersonaMem](data/personamem/README.md) when using its processed data.
 
 ## Acknowledgments and Licenses
 
 Graph construction builds on [Graphiti](https://github.com/getzep/graphiti).
-See [third-party notices](THIRD_PARTY_NOTICES.md) for attribution and modifications.
+See [attribution and modifications](docs/implementation.md#third-party-notices).
 
 Code: [Apache-2.0](LICENSE). PersonaMem data: [MIT](data/personamem/LICENSE).

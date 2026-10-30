@@ -1240,7 +1240,8 @@ async def get_relevant_nodes(
         if embedding_size == 0:
             return []
 
-        # FIXME: Kuzu currently does not support using variables such as `node.fulltext_query` as an input to FTS, which means `get_relevant_nodes()` won't work with Kuzu as the graph driver.
+        # Kuzu FTS does not accept node.fulltext_query as a variable input;
+        # this branch uses vector similarity instead of full-text search.
         query = (
             """
                                                                                                                                     UNWIND $nodes AS node

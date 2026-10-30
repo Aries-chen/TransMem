@@ -1,6 +1,8 @@
 """
 Copyright 2024, Zep Software, Inc.
 
+Modified for TransMem. See docs/graphiti_changes.patch for source changes.
+
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -222,7 +224,7 @@ async def add_nodes_and_edges_bulk_tx(
         await driver.graph_operations_interface.edge_save_bulk(None, driver, tx, edges)
 
     elif driver.provider == GraphProvider.KUZU:
-        # FIXME: Kuzu's UNWIND does not currently support STRUCT[] type properly, so we insert the data one by one instead for now.
+        # Insert records individually because Kuzu UNWIND does not support STRUCT[] properly.
         episode_query = get_episode_node_save_bulk_query(driver.provider)
         for episode in episodes:
             await tx.run(episode_query, **episode)
