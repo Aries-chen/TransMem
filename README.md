@@ -62,8 +62,7 @@ If you use TransMem, please cite:
   title     = {TransMem: Transition-Aware Retrieval for Evolving Personal Memory},
   author    = {Chen, Shigeng and Luo, Linhao and Shi, Changlong and Qiu, Zhangchi and Pan, Shirui},
   booktitle = {Advances in Neural Information Processing Systems},
-  year      = {2026},
-  note      = {Accepted; to appear}
+  year      = {2026}
 }
 ```
 
