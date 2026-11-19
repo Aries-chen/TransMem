@@ -3,6 +3,8 @@
 **TransMem: Transition-Aware Retrieval for Evolving Personal Memory**  
 Accepted at **NeurIPS 2026**.
 
+[Paper (arXiv)](https://arxiv.org/pdf/2611.10683)
+
 TransMem stores preference changes as explicit transition records alongside
 ordinary facts. It organizes conversations into topic-structured memory graphs,
 retrieves factual anchors, and adaptively follows relevant transitions to recover
